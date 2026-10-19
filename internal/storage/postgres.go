@@ -94,15 +94,30 @@ ON CONFLICT (event_type) DO UPDATE
 SET event_count = event_stats.event_count + 1,
     amount_total = event_stats.amount_total + EXCLUDED.amount_total`
 
-// Save records the event and applies its side effect.
-func (s *Store) Save(ctx context.Context, ev event.Event, amount int64) error {
-	if _, err := s.pool.Exec(ctx, saveEventSQL, ev.ID, ev.Type, ev.Payload, ev.OccurredAt); err != nil {
-		return fmt.Errorf("save event: %w", err)
+// Complete -> records the event and applies its side effect
+// in one transaction; returns false if already applied
+func (s *Store) Complete(ctx context.Context, ev event.Event, amount int64) (applied bool, err error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, err
 	}
-	if _, err := s.pool.Exec(ctx, applyStatsSQL, ev.Type, amount); err != nil {
-		return fmt.Errorf("apply stats: %w", err)
+	defer func() { _ = tx.Rollback(ctx) }()
+	tag, err := tx.Exec(ctx, saveEventSQL, ev.ID, ev.Type, ev.Payload, ev.OccurredAt)
+
+	if err != nil {
+		return false, err
 	}
-	return nil
+
+	if tag.RowsAffected() == 0 {
+		return false, nil
+	}
+
+	_, err = tx.Exec(ctx, applyStatsSQL, ev.Type, amount)
+	if err != nil {
+		return false, err
+	}
+
+	return true, tx.Commit(ctx)
 }
 
 func (s *Store) Stats(ctx context.Context) ([]TypeStats, error) {

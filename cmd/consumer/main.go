@@ -58,8 +58,13 @@ func main() {
 				log.Printf("partition=%d offset=%d event=%s: %v", r.Partition, r.Offset, ev.ID, err)
 				return
 			}
-			if err := store.Save(ctx, ev, amount); err != nil {
+			applied, err := store.Complete(ctx, ev, amount)
+			if err != nil {
 				log.Printf("partition=%d offset=%d event=%s save failed: %v", r.Partition, r.Offset, ev.ID, err)
+				return
+			}
+			if !applied {
+				log.Printf("partition=%d offset=%d event=%s already saved, skipping duplicate", r.Partition, r.Offset, ev.ID)
 				return
 			}
 			log.Printf("partition=%d offset=%d event=%s saved", r.Partition, r.Offset, ev.ID)
