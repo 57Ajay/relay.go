@@ -32,7 +32,20 @@ func main() {
 	mux.HandleFunc("POST /v1/events", func(w http.ResponseWriter, r *http.Request) {
 		ev, err := event.Decode(r.Body)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			writeJSON(w, http.StatusBadRequest, errorBody{Error: "malformed request body", Details: []string{err.Error()}})
+			return
+		}
+
+		if ev.ID == "" {
+			ev.ID = event.NewID()
+		}
+
+		if err := ev.Validate(time.Now()); err != nil {
+			body := errorBody{Error: "invalid event"}
+			if verr, ok := errors.AsType[*event.ValidationError](err); ok {
+				body.Details = verr.Problems
+			}
+			writeJSON(w, http.StatusBadRequest, body)
 			return
 		}
 
@@ -40,7 +53,7 @@ func main() {
 		defer cancel()
 		if err := producer.Publish(ctx, ev); err != nil {
 			log.Printf("publish %s: %v", ev.ID, err)
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "event broker unavailable"})
+			writeJSON(w, http.StatusServiceUnavailable, errorBody{Error: "event broker unavailable, retry with the same event_id", EventID: ev.ID})
 			return
 		}
 
@@ -56,10 +69,10 @@ func main() {
 		rec, err := store.Get(r.Context(), r.PathValue("id"))
 		switch {
 		case errors.Is(err, storage.ErrNotFound):
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "event not found"})
+			writeJSON(w, http.StatusNotFound, errorBody{Error: "event not found"})
 		case err != nil:
 			log.Printf("get event: %v", err)
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "status store unavailable"})
+			writeJSON(w, http.StatusServiceUnavailable, errorBody{Error: "status store unavailable"})
 		default:
 			writeJSON(w, http.StatusOK, rec)
 		}
@@ -69,13 +82,19 @@ func main() {
 		stats, err := store.Stats(r.Context())
 		if err != nil {
 			log.Printf("stats: %v", err)
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "status store unavailable"})
+			writeJSON(w, http.StatusServiceUnavailable, errorBody{Error: "status store unavailable"})
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"stats": stats})
 	})
 
 	log.Fatal(http.ListenAndServe(":8080", mux))
+}
+
+type errorBody struct {
+	Error   string   `json:"error"`
+	EventID string   `json:"event_id,omitempty"`
+	Details []string `json:"details,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

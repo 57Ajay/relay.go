@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/57Ajay/relay/internal/event"
 	"github.com/57Ajay/relay/internal/kafka"
@@ -50,11 +51,11 @@ func (h handler) Handle(ctx context.Context, r *kgo.Record) error {
 		log.Printf("partition=%d offset=%d undecodable, skipping: %v", r.Partition, r.Offset, err)
 		return nil
 	}
-	amount, err := ev.Amount()
-	if err != nil {
-		log.Printf("partition=%d offset=%d event=%s bad amount, skipping: %v", r.Partition, r.Offset, ev.ID, err)
+	if err := ev.Validate(time.Now()); err != nil {
+		log.Printf("partition=%d offset=%d event=%s invalid, skipping: %v", r.Partition, r.Offset, ev.ID, err)
 		return nil
 	}
+	amount, _ := ev.Amount()
 	claimed, err := h.store.Claim(ctx, ev)
 	if err != nil {
 		return err
