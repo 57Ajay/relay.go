@@ -44,8 +44,6 @@ type handler struct {
 	store *storage.Store
 }
 
-// Handle returns an error only for failures worth retrying; undecodable
-// records are skipped.
 func (h handler) Handle(ctx context.Context, r *kgo.Record) error {
 	ev, err := event.Decode(bytes.NewReader(r.Value))
 	if err != nil {
@@ -55,6 +53,14 @@ func (h handler) Handle(ctx context.Context, r *kgo.Record) error {
 	amount, err := ev.Amount()
 	if err != nil {
 		log.Printf("partition=%d offset=%d event=%s bad amount, skipping: %v", r.Partition, r.Offset, ev.ID, err)
+		return nil
+	}
+	claimed, err := h.store.Claim(ctx, ev)
+	if err != nil {
+		return err
+	}
+	if !claimed {
+		log.Printf("partition=%d offset=%d event=%s already processed, skipping duplicate", r.Partition, r.Offset, ev.ID)
 		return nil
 	}
 	applied, err := h.store.Complete(ctx, ev, amount)

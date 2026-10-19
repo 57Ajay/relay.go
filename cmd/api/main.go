@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"time"
@@ -42,7 +43,26 @@ func main() {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "event broker unavailable"})
 			return
 		}
+
+		pctx, pcancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		defer pcancel()
+		if err := store.MarkPending(pctx, ev); err != nil {
+			log.Printf("mark pending %s: %v", ev.ID, err)
+		}
 		writeJSON(w, http.StatusAccepted, map[string]string{"event_id": ev.ID, "status": "accepted"})
+	})
+
+	mux.HandleFunc("GET /v1/events/{id}", func(w http.ResponseWriter, r *http.Request) {
+		rec, err := store.Get(r.Context(), r.PathValue("id"))
+		switch {
+		case errors.Is(err, storage.ErrNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "event not found"})
+		case err != nil:
+			log.Printf("get event: %v", err)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "status store unavailable"})
+		default:
+			writeJSON(w, http.StatusOK, rec)
+		}
 	})
 
 	mux.HandleFunc("GET /v1/stats", func(w http.ResponseWriter, r *http.Request) {

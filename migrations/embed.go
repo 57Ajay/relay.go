@@ -1,5 +1,4 @@
-// Package migrations bakes the .sql files into the binary,
-// so the deployed image doesn't need the files on disk.
+// Package migrations embeds the SQL schema migrations.
 package migrations
 
 import "embed"

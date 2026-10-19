@@ -8,6 +8,15 @@ import (
 	"time"
 )
 
+type Status string
+
+const (
+	StatusPending    Status = "pending"
+	StatusProcessing Status = "processing"
+	StatusProcessed  Status = "processed"
+	StatusFailed     Status = "failed"
+)
+
 type Event struct {
 	ID         string          `json:"event_id"`
 	Type       string          `json:"event_type"`
@@ -27,7 +36,6 @@ func Decode(r io.Reader) (Event, error) {
 	return ev, nil
 }
 
-// Amount returns payload.amount, or 0 when it is absent.
 func (e *Event) Amount() (int64, error) {
 	var p struct {
 		Amount int64 `json:"amount"`

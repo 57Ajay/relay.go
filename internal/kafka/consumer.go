@@ -8,8 +8,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// Handler returns nil once a record is fully handled. Any error leaves the
-// record uncommitted.
+// Handler returns nil once a record is fully handled; an error leaves it uncommitted.
 type Handler interface {
 	Handle(ctx context.Context, rec *kgo.Record) error
 }
@@ -33,8 +32,6 @@ func NewConsumer(brokers []string, group, topic string) (*Consumer, error) {
 
 func (c *Consumer) Close() { c.cl.Close() }
 
-// Run consumes until ctx is cancelled, committing only records the handler
-// completed.
 func (c *Consumer) Run(ctx context.Context, h Handler) error {
 	for {
 		fetches := c.cl.PollRecords(ctx, 1000)
@@ -56,7 +53,6 @@ func (c *Consumer) Run(ctx context.Context, h Handler) error {
 	}
 }
 
-// handle retries until the record is handled; false means ctx was cancelled.
 func (c *Consumer) handle(ctx context.Context, h Handler, rec *kgo.Record) bool {
 	for {
 		err := h.Handle(ctx, rec)
@@ -72,7 +68,6 @@ func (c *Consumer) handle(ctx context.Context, h Handler, rec *kgo.Record) bool 
 	}
 }
 
-// commit runs even after ctx is cancelled so finished work is not redone.
 func (c *Consumer) commit(ctx context.Context, done []*kgo.Record) {
 	if len(done) == 0 {
 		return
