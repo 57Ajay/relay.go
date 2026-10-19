@@ -16,20 +16,23 @@ type Producer struct {
 }
 
 func NewProducer(brokers []string, topic string) (*Producer, error) {
+	cl, err := newClient(brokers)
+	if err != nil {
+		return nil, err
+	}
+	return &Producer{cl: cl, topic: topic}, nil
+}
+
+func newClient(brokers []string, opts ...kgo.Opt) (*kgo.Client, error) {
 	base := []kgo.Opt{
 		kgo.SeedBrokers(brokers...),
 		kgo.RequiredAcks(kgo.AllISRAcks()),
 	}
-	client, err := kgo.NewClient(base...)
+	cl, err := kgo.NewClient(append(base, opts...)...)
 	if err != nil {
 		return nil, fmt.Errorf("create kafka client: %w", err)
 	}
-	producer := Producer{
-		cl:    client,
-		topic: topic,
-	}
-
-	return &producer, nil
+	return cl, nil
 }
 
 func (p *Producer) Publish(ctx context.Context, ev event.Event) error {

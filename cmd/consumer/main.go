@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/57Ajay/relay/internal/event"
+	"github.com/57Ajay/relay/internal/kafka"
 	"github.com/57Ajay/relay/internal/storage"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
@@ -26,49 +27,44 @@ func main() {
 		log.Fatal("migrate: ", err)
 	}
 
-	client, err := kgo.NewClient(
-		kgo.SeedBrokers("localhost:9094"),
-		kgo.ConsumerGroup("relay-consumers"),
-		kgo.ConsumeTopics("events"),
-		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
-	)
+	consumer, err := kafka.NewConsumer([]string{"localhost:9094"}, "relay-consumers", "events")
 	if err != nil {
-		log.Fatal("failed to create client: ", err)
+		log.Fatal("failed to create consumer: ", err)
 	}
-	defer client.Close()
+	defer consumer.Close()
 
 	log.Println("consumer started")
-	for {
-		fetches := client.PollFetches(ctx)
-		if ctx.Err() != nil {
-			break
-		}
-		for _, fe := range fetches.Errors() {
-			log.Printf("fetch %s/%d: %v", fe.Topic, fe.Partition, fe.Err)
-		}
-
-		fetches.EachRecord(func(r *kgo.Record) {
-			ev, err := event.Decode(bytes.NewReader(r.Value))
-			if err != nil {
-				log.Printf("partition=%d offset=%d undecodable: %v", r.Partition, r.Offset, err)
-				return
-			}
-			amount, err := ev.Amount()
-			if err != nil {
-				log.Printf("partition=%d offset=%d event=%s: %v", r.Partition, r.Offset, ev.ID, err)
-				return
-			}
-			applied, err := store.Complete(ctx, ev, amount)
-			if err != nil {
-				log.Printf("partition=%d offset=%d event=%s save failed: %v", r.Partition, r.Offset, ev.ID, err)
-				return
-			}
-			if !applied {
-				log.Printf("partition=%d offset=%d event=%s already saved, skipping duplicate", r.Partition, r.Offset, ev.ID)
-				return
-			}
-			log.Printf("partition=%d offset=%d event=%s saved", r.Partition, r.Offset, ev.ID)
-		})
+	if err := consumer.Run(ctx, handler{store: store}); err != nil {
+		log.Println("consumer failed: ", err)
 	}
 	log.Println("consumer stopped")
+}
+
+type handler struct {
+	store *storage.Store
+}
+
+// Handle returns an error only for failures worth retrying; undecodable
+// records are skipped.
+func (h handler) Handle(ctx context.Context, r *kgo.Record) error {
+	ev, err := event.Decode(bytes.NewReader(r.Value))
+	if err != nil {
+		log.Printf("partition=%d offset=%d undecodable, skipping: %v", r.Partition, r.Offset, err)
+		return nil
+	}
+	amount, err := ev.Amount()
+	if err != nil {
+		log.Printf("partition=%d offset=%d event=%s bad amount, skipping: %v", r.Partition, r.Offset, ev.ID, err)
+		return nil
+	}
+	applied, err := h.store.Complete(ctx, ev, amount)
+	if err != nil {
+		return err
+	}
+	if !applied {
+		log.Printf("partition=%d offset=%d event=%s already saved, skipping duplicate", r.Partition, r.Offset, ev.ID)
+		return nil
+	}
+	log.Printf("partition=%d offset=%d event=%s saved", r.Partition, r.Offset, ev.ID)
+	return nil
 }
