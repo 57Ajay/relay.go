@@ -38,12 +38,16 @@ type TypeStats struct {
 	LastEventAt time.Time `json:"last_event_at"`
 }
 
-func Open(ctx context.Context, url string, maxConns int32) (*Store, error) {
+// Open creates a pool. asyncCommit skips waiting for the WAL flush; only for writes safe to lose.
+func Open(ctx context.Context, url string, maxConns int32, asyncCommit bool) (*Store, error) {
 	cfg, err := pgxpool.ParseConfig(url)
 	if err != nil {
 		return nil, fmt.Errorf("parse database url: %w", err)
 	}
 	cfg.MaxConns = maxConns
+	if asyncCommit {
+		cfg.ConnConfig.RuntimeParams["synchronous_commit"] = "off"
+	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {

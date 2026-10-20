@@ -25,8 +25,10 @@ type Producer struct {
 	dlqTopic string
 }
 
+// NewProducer builds the API's producer. Deadlines hold even for records already in flight;
+// a resulting Kafka duplicate is harmless because consumers deduplicate by event ID.
 func NewProducer(brokers []string, topic, dlqTopic string) (*Producer, error) {
-	cl, err := newClient(brokers)
+	cl, err := newClient(brokers, kgo.AllowIdempotentProduceCancellation())
 	if err != nil {
 		return nil, err
 	}
