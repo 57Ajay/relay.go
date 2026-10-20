@@ -77,7 +77,9 @@ func (p *Producer) DeadLetter(ctx context.Context, rec *kgo.Record, reason strin
 	return nil
 }
 
+func (p *Producer) Ping(ctx context.Context) error { return p.cl.Ping(ctx) }
+
 func (p *Producer) Close(ctx context.Context) {
-	p.cl.Flush(ctx)
+	_ = p.cl.Flush(ctx)
 	p.cl.Close()
 }

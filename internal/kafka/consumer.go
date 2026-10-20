@@ -2,7 +2,7 @@ package kafka
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -17,9 +17,10 @@ type Consumer struct {
 	cl       *kgo.Client
 	topic    string
 	dlqTopic string
+	log      *slog.Logger
 }
 
-func NewConsumer(brokers []string, group, topic, dlqTopic string) (*Consumer, error) {
+func NewConsumer(brokers []string, group, topic, dlqTopic string, log *slog.Logger) (*Consumer, error) {
 	cl, err := newClient(brokers,
 		kgo.ConsumerGroup(group),
 		kgo.ConsumeTopics(topic),
@@ -29,7 +30,7 @@ func NewConsumer(brokers []string, group, topic, dlqTopic string) (*Consumer, er
 	if err != nil {
 		return nil, err
 	}
-	return &Consumer{cl: cl, topic: topic, dlqTopic: dlqTopic}, nil
+	return &Consumer{cl: cl, topic: topic, dlqTopic: dlqTopic, log: log}, nil
 }
 
 // Producer shares the consumer's client for dead-letter publishing.
@@ -37,7 +38,10 @@ func (c *Consumer) Producer() *Producer {
 	return &Producer{cl: c.cl, topic: c.topic, dlqTopic: c.dlqTopic}
 }
 
-func (c *Consumer) Close() { c.cl.Close() }
+func (c *Consumer) Ping(ctx context.Context) error { return c.cl.Ping(ctx) }
+
+// Close leaves the group so partitions move to other members right away.
+func (c *Consumer) Close() { c.cl.CloseAllowingRebalance() }
 
 func (c *Consumer) Run(ctx context.Context, h Handler) error {
 	for {
@@ -46,7 +50,7 @@ func (c *Consumer) Run(ctx context.Context, h Handler) error {
 			return nil
 		}
 		for _, fe := range fetches.Errors() {
-			log.Printf("fetch %s/%d: %v", fe.Topic, fe.Partition, fe.Err)
+			c.log.ErrorContext(ctx, "fetch failed", "topic", fe.Topic, "partition", fe.Partition, "err", fe.Err)
 		}
 
 		var done []*kgo.Record
@@ -66,7 +70,7 @@ func (c *Consumer) handle(ctx context.Context, h Handler, rec *kgo.Record) bool 
 		if err == nil {
 			return true
 		}
-		log.Printf("partition=%d offset=%d not handled, retrying: %v", rec.Partition, rec.Offset, err)
+		c.log.WarnContext(ctx, "record not handled; retrying", "partition", rec.Partition, "offset", rec.Offset, "err", err)
 		select {
 		case <-ctx.Done():
 			return false
@@ -82,6 +86,6 @@ func (c *Consumer) commit(ctx context.Context, done []*kgo.Record) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	if err := c.cl.CommitRecords(ctx, done...); err != nil {
-		log.Printf("offset commit failed; records will be redelivered: %v", err)
+		c.log.ErrorContext(ctx, "offset commit failed; records will be redelivered", "err", err)
 	}
 }

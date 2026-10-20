@@ -2,53 +2,106 @@ package main
 
 import (
 	"context"
-	"log"
+	"errors"
+	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/57Ajay/relay/internal/config"
 	"github.com/57Ajay/relay/internal/kafka"
 	"github.com/57Ajay/relay/internal/processor"
 	"github.com/57Ajay/relay/internal/storage"
+	"github.com/57Ajay/relay/internal/telemetry"
 )
 
 func main() {
+	if len(os.Args) == 3 && os.Args[1] == "probe" {
+		os.Exit(telemetry.Probe(os.Args[2]))
+	}
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "consumer:", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	cfg, err := config.LoadConsumer()
 	if err != nil {
-		log.Fatal("config: ", err)
+		return fmt.Errorf("config: %w", err)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	log := telemetry.NewLogger(os.Stdout, cfg.ServiceName, cfg.LogLevel)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	store, err := storage.Open(ctx, cfg.DatabaseURL, cfg.DBMaxConns)
 	if err != nil {
-		log.Fatal("failed to open the store: ", err)
+		return err
 	}
 	defer store.Close()
 	if cfg.Migrate {
-		if err := store.Migrate(ctx); err != nil {
-			log.Fatal("migrate: ", err)
+		if err := migrate(ctx, store, log); err != nil {
+			return err
 		}
 	}
 
-	consumer, err := kafka.NewConsumer(cfg.Brokers, cfg.GroupID, cfg.Topic, cfg.DLQTopic)
+	consumer, err := kafka.NewConsumer(cfg.Brokers, cfg.GroupID, cfg.Topic, cfg.DLQTopic, log.With("component", "kafka"))
 	if err != nil {
-		log.Fatal("failed to create consumer: ", err)
+		return err
 	}
-	defer consumer.Close()
-
 	proc := processor.New(store, consumer.Producer(), processor.Config{
 		MaxAttempts: cfg.MaxAttempts,
 		Backoff:     processor.Backoff{Base: cfg.RetryBaseDelay, Max: cfg.RetryMaxDelay},
 		OpTimeout:   cfg.OpTimeout,
 		FaultRate:   cfg.FaultRate,
-	}, slog.Default())
+	}, log.With("component", "processor"))
 
-	log.Println("consumer started")
-	if err := consumer.Run(ctx, proc); err != nil {
-		log.Println("consumer failed: ", err)
+	var draining atomic.Bool
+	ops := &http.Server{
+		Addr: cfg.OpsAddr,
+		Handler: telemetry.OpsMux(&draining,
+			telemetry.Check{Name: "kafka", Critical: true, Fn: consumer.Ping},
+			telemetry.Check{Name: "postgres", Critical: true, Fn: store.Ping}),
+		ReadHeaderTimeout: 5 * time.Second,
 	}
-	log.Println("consumer stopped")
+	go func() {
+		if err := ops.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+			log.Error("ops server failed", "err", err)
+		}
+	}()
+
+	log.Info("consumer started", "group", cfg.GroupID, "topic", cfg.Topic)
+	runErr := consumer.Run(ctx, proc)
+	stop()
+
+	draining.Store(true)
+	log.Info("leaving consumer group")
+	consumer.Close()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = ops.Shutdown(shutdownCtx)
+	log.Info("consumer stopped")
+	return runErr
+}
+
+// migrate retries while PostgreSQL is still starting.
+func migrate(ctx context.Context, store *storage.Store, log *slog.Logger) error {
+	for attempt := 1; ; attempt++ {
+		err := store.Migrate(ctx)
+		if err == nil {
+			return nil
+		}
+		if attempt == 10 || ctx.Err() != nil {
+			return fmt.Errorf("migrate: %w", err)
+		}
+		log.Warn("database not ready; retrying migration", "attempt", attempt, "err", err)
+		select {
+		case <-ctx.Done():
+		case <-time.After(3 * time.Second):
+		}
+	}
 }
