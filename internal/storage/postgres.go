@@ -110,7 +110,8 @@ const claimSQL = `
 INSERT INTO processed_events (event_id, event_type, payload, occurred_at, status, attempts)
 VALUES ($1, $2, $3, $4, 'processing', 1)
 ON CONFLICT (event_id) DO UPDATE
-SET status = 'processing', attempts = processed_events.attempts + 1, updated_at = now()
+SET status = 'processing', attempts = processed_events.attempts + 1, updated_at = now(),
+    event_type = EXCLUDED.event_type, payload = EXCLUDED.payload, occurred_at = EXCLUDED.occurred_at
 WHERE processed_events.status <> 'processed'
 RETURNING attempts`
 
@@ -128,7 +129,8 @@ const completeSQL = `
 INSERT INTO processed_events (event_id, event_type, payload, occurred_at, status, attempts, processed_at)
 VALUES ($1, $2, $3, $4, 'processed', 1, now())
 ON CONFLICT (event_id) DO UPDATE
-SET status = 'processed', processed_at = now(), last_error = NULL, updated_at = now()
+SET status = 'processed', processed_at = now(), last_error = NULL, updated_at = now(),
+    event_type = EXCLUDED.event_type, payload = EXCLUDED.payload, occurred_at = EXCLUDED.occurred_at
 WHERE processed_events.status <> 'processed'`
 
 const applyStatsSQL = `
@@ -159,6 +161,19 @@ func (s *Store) Complete(ctx context.Context, ev event.Event, amount int64) (app
 		return false, err
 	}
 	return true, tx.Commit(ctx)
+}
+
+const markFailedSQL = `
+INSERT INTO processed_events (event_id, event_type, payload, occurred_at, status, attempts, last_error)
+VALUES ($1, $2, $3, $4, 'failed', $5, $6)
+ON CONFLICT (event_id) DO UPDATE
+SET status = 'failed', last_error = EXCLUDED.last_error, updated_at = now(),
+    attempts = GREATEST(processed_events.attempts, EXCLUDED.attempts)
+WHERE processed_events.status <> 'processed'`
+
+func (s *Store) MarkFailed(ctx context.Context, ev event.Event, attempts int, reason string) error {
+	_, err := s.pool.Exec(ctx, markFailedSQL, ev.ID, ev.Type, ev.Payload, ev.OccurredAt, attempts, reason)
+	return err
 }
 
 const getSQL = `

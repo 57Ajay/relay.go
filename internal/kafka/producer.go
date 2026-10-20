@@ -5,22 +5,32 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 
 	"github.com/57Ajay/relay/internal/event"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
+const (
+	HeaderDLQReason       = "x-dlq-reason"
+	HeaderDLQAttempts     = "x-dlq-attempts"
+	HeaderOriginTopic     = "x-origin-topic"
+	HeaderOriginPartition = "x-origin-partition"
+	HeaderOriginOffset    = "x-origin-offset"
+)
+
 type Producer struct {
-	cl    *kgo.Client
-	topic string
+	cl       *kgo.Client
+	topic    string
+	dlqTopic string
 }
 
-func NewProducer(brokers []string, topic string) (*Producer, error) {
+func NewProducer(brokers []string, topic, dlqTopic string) (*Producer, error) {
 	cl, err := newClient(brokers)
 	if err != nil {
 		return nil, err
 	}
-	return &Producer{cl: cl, topic: topic}, nil
+	return &Producer{cl: cl, topic: topic, dlqTopic: dlqTopic}, nil
 }
 
 func newClient(brokers []string, opts ...kgo.Opt) (*kgo.Client, error) {
@@ -48,6 +58,23 @@ func (p *Producer) Publish(ctx context.Context, ev event.Event) error {
 	}
 
 	return p.cl.ProduceSync(ctx, &record).FirstErr()
+}
+
+// DeadLetter copies the original key, value and headers to the DLQ and adds why and where from.
+func (p *Producer) DeadLetter(ctx context.Context, rec *kgo.Record, reason string, attempts int) error {
+	headers := append(make([]kgo.RecordHeader, 0, len(rec.Headers)+5), rec.Headers...)
+	headers = append(headers,
+		kgo.RecordHeader{Key: HeaderDLQReason, Value: []byte(reason)},
+		kgo.RecordHeader{Key: HeaderDLQAttempts, Value: []byte(strconv.Itoa(attempts))},
+		kgo.RecordHeader{Key: HeaderOriginTopic, Value: []byte(rec.Topic)},
+		kgo.RecordHeader{Key: HeaderOriginPartition, Value: []byte(strconv.Itoa(int(rec.Partition)))},
+		kgo.RecordHeader{Key: HeaderOriginOffset, Value: []byte(strconv.FormatInt(rec.Offset, 10))},
+	)
+	dlq := &kgo.Record{Topic: p.dlqTopic, Key: rec.Key, Value: rec.Value, Headers: headers}
+	if err := p.cl.ProduceSync(ctx, dlq).FirstErr(); err != nil {
+		return fmt.Errorf("produce to %s: %w", p.dlqTopic, err)
+	}
+	return nil
 }
 
 func (p *Producer) Close(ctx context.Context) {

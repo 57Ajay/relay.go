@@ -14,10 +14,12 @@ type Handler interface {
 }
 
 type Consumer struct {
-	cl *kgo.Client
+	cl       *kgo.Client
+	topic    string
+	dlqTopic string
 }
 
-func NewConsumer(brokers []string, group, topic string) (*Consumer, error) {
+func NewConsumer(brokers []string, group, topic, dlqTopic string) (*Consumer, error) {
 	cl, err := newClient(brokers,
 		kgo.ConsumerGroup(group),
 		kgo.ConsumeTopics(topic),
@@ -27,7 +29,12 @@ func NewConsumer(brokers []string, group, topic string) (*Consumer, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Consumer{cl: cl}, nil
+	return &Consumer{cl: cl, topic: topic, dlqTopic: dlqTopic}, nil
+}
+
+// Producer shares the consumer's client for dead-letter publishing.
+func (c *Consumer) Producer() *Producer {
+	return &Producer{cl: c.cl, topic: c.topic, dlqTopic: c.dlqTopic}
 }
 
 func (c *Consumer) Close() { c.cl.Close() }

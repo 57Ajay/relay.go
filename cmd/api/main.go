@@ -16,7 +16,7 @@ import (
 func main() {
 	ctx := context.Background()
 
-	producer, err := kafka.NewProducer([]string{"localhost:9094"}, "events")
+	producer, err := kafka.NewProducer([]string{"localhost:9094"}, "events", "events.dlq")
 	if err != nil {
 		log.Fatal("failed to start the producer: ", err)
 	}

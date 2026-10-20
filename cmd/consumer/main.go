@@ -1,18 +1,18 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
-	"github.com/57Ajay/relay/internal/event"
 	"github.com/57Ajay/relay/internal/kafka"
+	"github.com/57Ajay/relay/internal/processor"
 	"github.com/57Ajay/relay/internal/storage"
-	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 func main() {
@@ -28,50 +28,23 @@ func main() {
 		log.Fatal("migrate: ", err)
 	}
 
-	consumer, err := kafka.NewConsumer([]string{"localhost:9094"}, "relay-consumers", "events")
+	consumer, err := kafka.NewConsumer([]string{"localhost:9094"}, "relay-consumers", "events", "events.dlq")
 	if err != nil {
 		log.Fatal("failed to create consumer: ", err)
 	}
 	defer consumer.Close()
 
+	faultRate, _ := strconv.ParseFloat(os.Getenv("FAULT_RATE"), 64)
+	proc := processor.New(store, consumer.Producer(), processor.Config{
+		MaxAttempts: 5,
+		Backoff:     processor.Backoff{Base: 100 * time.Millisecond, Max: 5 * time.Second},
+		OpTimeout:   5 * time.Second,
+		FaultRate:   faultRate,
+	}, slog.Default())
+
 	log.Println("consumer started")
-	if err := consumer.Run(ctx, handler{store: store}); err != nil {
+	if err := consumer.Run(ctx, proc); err != nil {
 		log.Println("consumer failed: ", err)
 	}
 	log.Println("consumer stopped")
-}
-
-type handler struct {
-	store *storage.Store
-}
-
-func (h handler) Handle(ctx context.Context, r *kgo.Record) error {
-	ev, err := event.Decode(bytes.NewReader(r.Value))
-	if err != nil {
-		log.Printf("partition=%d offset=%d undecodable, skipping: %v", r.Partition, r.Offset, err)
-		return nil
-	}
-	if err := ev.Validate(time.Now()); err != nil {
-		log.Printf("partition=%d offset=%d event=%s invalid, skipping: %v", r.Partition, r.Offset, ev.ID, err)
-		return nil
-	}
-	amount, _ := ev.Amount()
-	claimed, err := h.store.Claim(ctx, ev)
-	if err != nil {
-		return err
-	}
-	if !claimed {
-		log.Printf("partition=%d offset=%d event=%s already processed, skipping duplicate", r.Partition, r.Offset, ev.ID)
-		return nil
-	}
-	applied, err := h.store.Complete(ctx, ev, amount)
-	if err != nil {
-		return err
-	}
-	if !applied {
-		log.Printf("partition=%d offset=%d event=%s already saved, skipping duplicate", r.Partition, r.Offset, ev.ID)
-		return nil
-	}
-	log.Printf("partition=%d offset=%d event=%s saved", r.Partition, r.Offset, ev.ID)
-	return nil
 }
