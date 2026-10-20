@@ -8,21 +8,26 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/57Ajay/relay/internal/config"
 	"github.com/57Ajay/relay/internal/event"
 	"github.com/57Ajay/relay/internal/kafka"
 	"github.com/57Ajay/relay/internal/storage"
 )
 
 func main() {
+	cfg, err := config.LoadAPI()
+	if err != nil {
+		log.Fatal("config: ", err)
+	}
 	ctx := context.Background()
 
-	producer, err := kafka.NewProducer([]string{"localhost:9094"}, "events", "events.dlq")
+	producer, err := kafka.NewProducer(cfg.Brokers, cfg.Topic, cfg.DLQTopic)
 	if err != nil {
 		log.Fatal("failed to start the producer: ", err)
 	}
 	defer producer.Close(ctx)
 
-	store, err := storage.Open(ctx, "postgres://relay:relay@localhost:5432/relay?sslmode=disable", 10)
+	store, err := storage.Open(ctx, cfg.DatabaseURL, cfg.DBMaxConns)
 	if err != nil {
 		log.Fatal("failed to open the store: ", err)
 	}
@@ -49,7 +54,7 @@ func main() {
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), cfg.PublishTimeout)
 		defer cancel()
 		if err := producer.Publish(ctx, ev); err != nil {
 			log.Printf("publish %s: %v", ev.ID, err)
@@ -88,7 +93,8 @@ func main() {
 		writeJSON(w, http.StatusOK, map[string]any{"stats": stats})
 	})
 
-	log.Fatal(http.ListenAndServe(":8080", mux))
+	log.Printf("api listening on %s", cfg.HTTPAddr)
+	log.Fatal(http.ListenAndServe(cfg.HTTPAddr, mux))
 }
 
 type errorBody struct {
