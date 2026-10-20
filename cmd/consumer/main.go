@@ -49,7 +49,15 @@ func run() error {
 		}
 	}
 
-	consumer, err := kafka.NewConsumer(cfg.Brokers, cfg.GroupID, cfg.Topic, cfg.DLQTopic, log.With("component", "kafka"))
+	consumer, err := kafka.NewConsumer(kafka.ConsumerConfig{
+		Brokers:        cfg.Brokers,
+		Group:          cfg.GroupID,
+		Topic:          cfg.Topic,
+		DLQTopic:       cfg.DLQTopic,
+		Workers:        cfg.Workers,
+		MaxPollRecords: cfg.MaxPollRecords,
+		SessionTimeout: cfg.SessionTimeout,
+	}, log.With("component", "kafka"))
 	if err != nil {
 		return err
 	}
@@ -74,7 +82,7 @@ func run() error {
 		}
 	}()
 
-	log.Info("consumer started", "group", cfg.GroupID, "topic", cfg.Topic)
+	log.Info("consumer started", "group", cfg.GroupID, "topic", cfg.Topic, "workers", cfg.Workers)
 	runErr := consumer.Run(ctx, proc)
 	stop()
 
