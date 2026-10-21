@@ -36,6 +36,12 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	shutdownTracing, err := telemetry.InitTracing(ctx, cfg.ServiceName, cfg.OTLPEndpoint, cfg.TraceRatio)
+	if err != nil {
+		return err
+	}
+	defer withTimeout(5*time.Second, func(ctx context.Context) { _ = shutdownTracing(ctx) })
+
 	producer, err := kafka.NewProducer(cfg.Brokers, cfg.Topic, cfg.DLQTopic)
 	if err != nil {
 		return err

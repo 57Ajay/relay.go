@@ -38,6 +38,12 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	shutdownTracing, err := telemetry.InitTracing(ctx, cfg.ServiceName, cfg.OTLPEndpoint, cfg.TraceRatio)
+	if err != nil {
+		return err
+	}
+	defer withTimeout(5*time.Second, func(ctx context.Context) { _ = shutdownTracing(ctx) })
+
 	store, err := storage.Open(ctx, cfg.DatabaseURL, cfg.DBMaxConns, false)
 	if err != nil {
 		return err
@@ -114,4 +120,10 @@ func migrate(ctx context.Context, store *storage.Store, log *slog.Logger) error 
 		case <-time.After(3 * time.Second):
 		}
 	}
+}
+
+func withTimeout(d time.Duration, fn func(context.Context)) {
+	ctx, cancel := context.WithTimeout(context.Background(), d)
+	defer cancel()
+	fn(ctx)
 }

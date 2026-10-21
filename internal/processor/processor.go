@@ -11,8 +11,13 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/57Ajay/relay/internal/event"
+	"github.com/57Ajay/relay/internal/kafka"
 	"github.com/57Ajay/relay/internal/telemetry"
 )
 
@@ -48,19 +53,32 @@ type Processor struct {
 	cfg     Config
 	log     *slog.Logger
 	metrics *telemetry.ConsumerMetrics
+	tracer  trace.Tracer
 }
 
 func New(store Store, dlq DeadLetterer, cfg Config, log *slog.Logger, m *telemetry.ConsumerMetrics) *Processor {
-	return &Processor{store: store, dlq: dlq, cfg: cfg, log: log, metrics: m}
+	return &Processor{store: store, dlq: dlq, cfg: cfg, log: log, metrics: m, tracer: otel.Tracer("relay/processor")}
 }
 
 // Handle implements kafka.Handler; it only returns an error when ctx is cancelled mid-retry.
 func (p *Processor) Handle(ctx context.Context, rec *kgo.Record) error {
 	start := time.Now()
+	ctx = otel.GetTextMapPropagator().Extract(ctx, kafka.HeaderCarrier{Record: rec})
+	ctx, span := p.tracer.Start(ctx, rec.Topic+" process", trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(
+			attribute.String("messaging.system", "kafka"),
+			attribute.Int("messaging.kafka.partition", int(rec.Partition)),
+			attribute.Int64("messaging.kafka.offset", rec.Offset),
+		))
+	defer span.End()
+
 	outcome, err := p.handle(ctx, rec)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
+	span.SetAttributes(attribute.String("relay.outcome", outcome))
 	p.metrics.Duration.WithLabelValues(outcome).Observe(time.Since(start).Seconds())
 	return nil
 }
@@ -77,6 +95,7 @@ func (p *Processor) handle(ctx context.Context, rec *kgo.Record) (string, error)
 		}
 		return p.deadLetter(ctx, rec, known, 1, err)
 	}
+	trace.SpanFromContext(ctx).SetAttributes(attribute.String("event.id", ev.ID), attribute.String("event.type", ev.Type))
 	log := p.log.With("event_id", ev.ID, "event_type", ev.Type)
 	amount, _ := ev.Amount()
 
@@ -159,6 +178,9 @@ func (p *Processor) deadLetter(ctx context.Context, rec *kgo.Record, ev *event.E
 		label = "permanent"
 	}
 	p.metrics.Failed.WithLabelValues(label).Inc()
+	span := trace.SpanFromContext(ctx)
+	span.RecordError(cause)
+	span.SetStatus(codes.Error, "dead-lettered: "+reason)
 	log := p.log.With("partition", rec.Partition, "offset", rec.Offset, "attempts", attempts, "reason", reason)
 	if ev == nil {
 		log.ErrorContext(ctx, "undecodable record dead-lettered")

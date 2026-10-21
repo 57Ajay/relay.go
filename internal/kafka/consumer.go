@@ -63,9 +63,7 @@ func NewConsumer(cfg ConsumerConfig, log *slog.Logger, m *telemetry.ConsumerMetr
 }
 
 // Producer shares the consumer's client for dead-letter publishing.
-func (c *Consumer) Producer() *Producer {
-	return &Producer{cl: c.cl, topic: c.cfg.Topic, dlqTopic: c.cfg.DLQTopic}
-}
+func (c *Consumer) Producer() *Producer { return newProducer(c.cl, c.cfg.Topic, c.cfg.DLQTopic) }
 
 func (c *Consumer) Ping(ctx context.Context) error { return c.cl.Ping(ctx) }
 

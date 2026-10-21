@@ -12,12 +12,17 @@ import (
 	"github.com/57Ajay/relay/migrations"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 var ErrNotFound = errors.New("event not found")
 
 type Store struct {
-	pool *pgxpool.Pool
+	pool   *pgxpool.Pool
+	tracer trace.Tracer
 }
 
 type Record struct {
@@ -53,7 +58,7 @@ func Open(ctx context.Context, url string, maxConns int32, asyncCommit bool) (*S
 	if err != nil {
 		return nil, fmt.Errorf("create pool: %w", err)
 	}
-	return &Store{pool: pool}, nil
+	return &Store{pool: pool, tracer: otel.Tracer("relay/storage")}, nil
 }
 
 func (s *Store) Close() { s.pool.Close() }
@@ -105,8 +110,10 @@ INSERT INTO processed_events (event_id, event_type, payload, occurred_at, status
 VALUES ($1, $2, $3, $4, 'pending')
 ON CONFLICT (event_id) DO NOTHING`
 
-func (s *Store) MarkPending(ctx context.Context, ev event.Event) error {
-	_, err := s.pool.Exec(ctx, markPendingSQL, ev.ID, ev.Type, ev.Payload, ev.OccurredAt)
+func (s *Store) MarkPending(ctx context.Context, ev event.Event) (err error) {
+	ctx, span := s.span(ctx, "mark_pending")
+	defer func() { finish(span, err) }()
+	_, err = s.pool.Exec(ctx, markPendingSQL, ev.ID, ev.Type, ev.Payload, ev.OccurredAt)
 	return err
 }
 
@@ -120,9 +127,11 @@ WHERE processed_events.status <> 'processed'
 RETURNING attempts`
 
 // Claim returns false if the event was already processed.
-func (s *Store) Claim(ctx context.Context, ev event.Event) (bool, error) {
+func (s *Store) Claim(ctx context.Context, ev event.Event) (claimed bool, err error) {
+	ctx, span := s.span(ctx, "claim")
+	defer func() { finish(span, err) }()
 	var attempts int
-	err := s.pool.QueryRow(ctx, claimSQL, ev.ID, ev.Type, ev.Payload, ev.OccurredAt).Scan(&attempts)
+	err = s.pool.QueryRow(ctx, claimSQL, ev.ID, ev.Type, ev.Payload, ev.OccurredAt).Scan(&attempts)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -148,6 +157,9 @@ SET event_count = event_stats.event_count + 1,
 
 // Complete returns false if another delivery already completed the event.
 func (s *Store) Complete(ctx context.Context, ev event.Event, amount int64) (applied bool, err error) {
+	ctx, span := s.span(ctx, "complete")
+	defer func() { finish(span, err) }()
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return false, err
@@ -175,8 +187,10 @@ SET status = 'failed', last_error = EXCLUDED.last_error, updated_at = now(),
     attempts = GREATEST(processed_events.attempts, EXCLUDED.attempts)
 WHERE processed_events.status <> 'processed'`
 
-func (s *Store) MarkFailed(ctx context.Context, ev event.Event, attempts int, reason string) error {
-	_, err := s.pool.Exec(ctx, markFailedSQL, ev.ID, ev.Type, ev.Payload, ev.OccurredAt, attempts, reason)
+func (s *Store) MarkFailed(ctx context.Context, ev event.Event, attempts int, reason string) (err error) {
+	ctx, span := s.span(ctx, "mark_failed")
+	defer func() { finish(span, err) }()
+	_, err = s.pool.Exec(ctx, markFailedSQL, ev.ID, ev.Type, ev.Payload, ev.OccurredAt, attempts, reason)
 	return err
 }
 
@@ -184,9 +198,10 @@ const getSQL = `
 SELECT event_id, event_type, status, attempts, COALESCE(last_error, ''), occurred_at, processed_at, updated_at
 FROM processed_events WHERE event_id = $1`
 
-func (s *Store) Get(ctx context.Context, id string) (Record, error) {
-	var rec Record
-	err := s.pool.QueryRow(ctx, getSQL, id).Scan(&rec.ID, &rec.Type, &rec.Status, &rec.Attempts,
+func (s *Store) Get(ctx context.Context, id string) (rec Record, err error) {
+	ctx, span := s.span(ctx, "get")
+	defer func() { finish(span, err) }()
+	err = s.pool.QueryRow(ctx, getSQL, id).Scan(&rec.ID, &rec.Type, &rec.Status, &rec.Attempts,
 		&rec.LastError, &rec.OccurredAt, &rec.ProcessedAt, &rec.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Record{}, ErrNotFound
@@ -205,4 +220,17 @@ func (s *Store) Stats(ctx context.Context) ([]TypeStats, error) {
 		err := row.Scan(&t.EventType, &t.Count, &t.AmountTotal, &t.LastEventAt)
 		return t, err
 	})
+}
+
+func (s *Store) span(ctx context.Context, op string) (context.Context, trace.Span) {
+	return s.tracer.Start(ctx, "postgres "+op, trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(attribute.String("db.system", "postgresql"), attribute.String("db.operation", op)))
+}
+
+func finish(span trace.Span, err error) {
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	span.End()
 }

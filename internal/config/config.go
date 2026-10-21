@@ -10,13 +10,15 @@ import (
 )
 
 type Common struct {
-	ServiceName string
-	LogLevel    string
-	Brokers     []string
-	Topic       string
-	DLQTopic    string
-	DatabaseURL string
-	DBMaxConns  int32
+	ServiceName  string
+	LogLevel     string
+	Brokers      []string
+	Topic        string
+	DLQTopic     string
+	DatabaseURL  string
+	DBMaxConns   int32
+	OTLPEndpoint string
+	TraceRatio   float64
 }
 
 type API struct {
@@ -102,17 +104,20 @@ type loader struct {
 
 func (l *loader) common(service string) Common {
 	c := Common{
-		ServiceName: l.str("SERVICE_NAME", service),
-		LogLevel:    l.str("LOG_LEVEL", "info"),
-		Brokers:     l.list("KAFKA_BROKERS", "localhost:9094"),
-		Topic:       l.str("KAFKA_TOPIC", "events"),
-		DLQTopic:    l.str("KAFKA_DLQ_TOPIC", "events.dlq"),
-		DatabaseURL: l.str("DATABASE_URL", "postgres://relay:relay@localhost:5432/relay?sslmode=disable"),
-		DBMaxConns:  int32(parse(l, "DB_MAX_CONNS", 10, strconv.Atoi)),
+		ServiceName:  l.str("SERVICE_NAME", service),
+		LogLevel:     l.str("LOG_LEVEL", "info"),
+		Brokers:      l.list("KAFKA_BROKERS", "localhost:9094"),
+		Topic:        l.str("KAFKA_TOPIC", "events"),
+		DLQTopic:     l.str("KAFKA_DLQ_TOPIC", "events.dlq"),
+		DatabaseURL:  l.str("DATABASE_URL", "postgres://relay:relay@localhost:5432/relay?sslmode=disable"),
+		DBMaxConns:   int32(parse(l, "DB_MAX_CONNS", 10, strconv.Atoi)),
+		OTLPEndpoint: l.str("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
+		TraceRatio:   parse(l, "TRACE_SAMPLE_RATIO", 1.0, parseFloat),
 	}
 	l.check(len(c.Brokers) > 0, "KAFKA_BROKERS must list at least one broker")
 	l.check(c.Topic != c.DLQTopic, "KAFKA_TOPIC and KAFKA_DLQ_TOPIC must differ")
 	l.check(c.DBMaxConns > 0, "DB_MAX_CONNS must be positive")
+	l.check(c.TraceRatio >= 0 && c.TraceRatio <= 1, "TRACE_SAMPLE_RATIO must be between 0 and 1")
 	return c
 }
 

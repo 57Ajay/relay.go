@@ -15,6 +15,11 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/57Ajay/relay/internal/event"
 	"github.com/57Ajay/relay/internal/storage"
@@ -47,6 +52,7 @@ type Server struct {
 	opts     Options
 	log      *slog.Logger
 	metrics  *telemetry.APIMetrics
+	tracer   trace.Tracer
 	inflight chan struct{}
 	draining atomic.Bool
 	handler  http.Handler
@@ -59,6 +65,7 @@ func New(pub Publisher, store Store, reg *prometheus.Registry, opts Options, log
 		opts:     opts,
 		log:      log,
 		metrics:  telemetry.NewAPIMetrics(reg),
+		tracer:   otel.Tracer("relay/api"),
 		inflight: make(chan struct{}, opts.MaxInFlight),
 	}
 	mux := http.NewServeMux()
@@ -168,12 +175,22 @@ func (s *Server) reject(w http.ResponseWriter, code int, msg string, details []s
 	writeError(w, code, msg, details)
 }
 
-// route records latency per route pattern, never the raw path, so label cardinality stays bounded.
+// route adds a server span (continuing any incoming W3C trace) and a latency histogram keyed by
+// the route pattern, never the raw path, so label cardinality stays bounded.
 func (s *Server) route(mux *http.ServeMux, pattern string, h http.HandlerFunc) {
 	mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		ctx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+		ctx, span := s.tracer.Start(ctx, pattern, trace.WithSpanKind(trace.SpanKindServer))
+		defer span.End()
+
 		rec := &statusRecorder{ResponseWriter: w, code: http.StatusOK}
-		h(rec, r)
+		h(rec, r.WithContext(ctx))
+
+		span.SetAttributes(attribute.Int("http.response.status_code", rec.code))
+		if rec.code >= http.StatusInternalServerError {
+			span.SetStatus(codes.Error, http.StatusText(rec.code))
+		}
 		s.metrics.Requests.WithLabelValues(pattern, strconv.Itoa(rec.code)).Observe(time.Since(start).Seconds())
 	})
 }
