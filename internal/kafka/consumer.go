@@ -3,9 +3,11 @@ package kafka
 import (
 	"context"
 	"log/slog"
+	"strconv"
 	"sync"
 	"time"
 
+	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/57Ajay/relay/internal/telemetry"
@@ -72,6 +74,9 @@ func (c *Consumer) Close() { c.cl.CloseAllowingRebalance() }
 
 // Run consumes until ctx is cancelled; in-flight records finish and completed offsets are committed.
 func (c *Consumer) Run(ctx context.Context, h Handler) error {
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	wg.Go(func() { c.reportLag(ctx) })
 	for {
 		fetches := c.cl.PollRecords(ctx, c.cfg.MaxPollRecords)
 		if fetches.IsClientClosed() || ctx.Err() != nil {
@@ -197,6 +202,30 @@ func (c *Consumer) onAssigned(_ context.Context, _ *kgo.Client, assigned map[str
 func (c *Consumer) onRevoked(_ context.Context, _ *kgo.Client, revoked map[string][]int32) {
 	if len(revoked) > 0 {
 		c.log.Info("partitions revoked", "partitions", revoked)
+	}
+}
+
+// reportLag publishes the group's committed-offset lag as the broker sees it; every replica reports every partition.
+func (c *Consumer) reportLag(ctx context.Context) {
+	adm := kadm.NewClient(c.cl)
+	t := time.NewTicker(5 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		lags, err := adm.Lag(ctx, c.cfg.Group)
+		if err != nil {
+			c.log.DebugContext(ctx, "lag lookup failed", "err", err)
+			continue
+		}
+		for _, l := range lags[c.cfg.Group].Lag.Sorted() {
+			if l.Err == nil && l.Topic == c.cfg.Topic {
+				c.metrics.Lag.WithLabelValues(strconv.Itoa(int(l.Partition))).Set(float64(l.Lag))
+			}
+		}
 	}
 }
 
