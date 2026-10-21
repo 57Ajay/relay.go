@@ -1,6 +1,7 @@
 SHELL := /bin/bash
+BENCH_DATABASE_URL ?= postgres://relay:relay@localhost:5432/relay?sslmode=disable
 
-.PHONY: build test integration up down reset logs
+.PHONY: build test integration up down reset logs bench
 
 build:
 	go build -o bin/ ./cmd/...
@@ -24,3 +25,6 @@ reset:
 
 logs:
 	docker compose logs -f api consumer
+
+bench:
+	go run ./cmd/loadgen -rate $${RATE:-1000} -duration $${DURATION:-30s} -db "$(BENCH_DATABASE_URL)"
