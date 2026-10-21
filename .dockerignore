@@ -1,0 +1,6 @@
+.git
+.github
+deploy
+monitoring
+*.md
+bin

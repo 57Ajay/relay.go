@@ -1,0 +1,34 @@
+{
+  "uid": "relay",
+  "title": "Relay pipeline",
+  "schemaVersion": 39,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    { "type": "timeseries", "title": "Ingest rate (events/s)", "gridPos": { "x": 0, "y": 0, "w": 8, "h": 8 },
+      "targets": [{ "expr": "sum by (result) (rate(events_received_total[1m]))", "legendFormat": "{{result}}" }] },
+    { "type": "timeseries", "title": "Processing rate (events/s)", "gridPos": { "x": 8, "y": 0, "w": 8, "h": 8 },
+      "targets": [{ "expr": "sum by (outcome) (rate(events_processed_total[1m]))", "legendFormat": "{{outcome}}" }] },
+    { "type": "timeseries", "title": "Retries and dead letters (events/s)", "gridPos": { "x": 16, "y": 0, "w": 8, "h": 8 },
+      "targets": [
+        { "expr": "sum by (class) (rate(events_retried_total[1m]))", "legendFormat": "retry {{class}}" },
+        { "expr": "sum by (reason) (rate(events_failed_total[1m]))", "legendFormat": "dlq {{reason}}" }
+      ] },
+    { "type": "timeseries", "title": "Consumer lag (records)", "gridPos": { "x": 0, "y": 8, "w": 8, "h": 8 },
+      "targets": [
+        { "expr": "sum(max by (partition) (kafka_consumer_lag))", "legendFormat": "total" },
+        { "expr": "max by (partition) (kafka_consumer_lag)", "legendFormat": "p{{partition}}" }
+      ] },
+    { "type": "timeseries", "title": "Processing latency", "fieldConfig": { "defaults": { "unit": "s" } }, "gridPos": { "x": 8, "y": 8, "w": 8, "h": 8 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(event_processing_duration_seconds_bucket[1m])))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(event_processing_duration_seconds_bucket[1m])))", "legendFormat": "p99" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(event_end_to_end_seconds_bucket[1m])))", "legendFormat": "end-to-end p99" }
+      ] },
+    { "type": "timeseries", "title": "Active workers / API p99", "gridPos": { "x": 16, "y": 8, "w": 8, "h": 8 },
+      "targets": [
+        { "expr": "sum(active_workers)", "legendFormat": "active workers" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{route=\"POST /v1/events\"}[1m])))", "legendFormat": "POST p99 (s)" }
+      ] }
+  ]
+}

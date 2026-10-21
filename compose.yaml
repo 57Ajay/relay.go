@@ -1,3 +1,19 @@
+name: relay
+
+x-relay: &relay
+  image: relay:dev
+  build: .
+  restart: unless-stopped
+  depends_on:
+    kafka-init: { condition: service_completed_successfully }
+    postgres: { condition: service_healthy }
+
+x-relay-env: &relay-env
+  KAFKA_BROKERS: kafka:9092
+  DATABASE_URL: postgres://relay:relay@postgres:5432/relay?sslmode=disable
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+  LOG_LEVEL: info
+
 services:
   kafka:
     image: apache/kafka:4.1.0
@@ -54,6 +70,56 @@ services:
       interval: 5s
       timeout: 5s
       retries: 12
+
+  api:
+    <<: *relay
+    environment:
+      <<: *relay-env
+      SERVICE_NAME: relay-api
+    ports: ["8080:8080"]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/api", "probe", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  consumer:
+    <<: *relay
+    entrypoint: ["/usr/local/bin/consumer"]
+    environment:
+      <<: *relay-env
+      SERVICE_NAME: relay-consumer
+      WORKERS: ${CONSUMER_WORKERS:-4}
+      FAULT_RATE: ${FAULT_RATE:-0}
+    deploy:
+      replicas: ${CONSUMER_REPLICAS:-2}
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/consumer", "probe", "http://localhost:9090/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--web.enable-lifecycle"]
+    volumes: [./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro]
+    ports: ["9090:9090"]
+
+  jaeger:
+    image: jaegertracing/jaeger:2.10.0
+    ports: ["16686:16686", "4318:4318"]
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./monitoring/grafana/provisioning.yaml:/etc/grafana/provisioning/datasources/relay.yaml:ro
+      - ./monitoring/grafana/dashboards.yaml:/etc/grafana/provisioning/dashboards/relay.yaml:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["3000:3000"]
 
 volumes:
   kafka-data:
