@@ -50,6 +50,8 @@ func NewConsumer(cfg ConsumerConfig, log *slog.Logger, m *telemetry.ConsumerMetr
 		kgo.DisableAutoCommit(),
 		kgo.BlockRebalanceOnPoll(),
 		kgo.SessionTimeout(cfg.SessionTimeout),
+		// Small per-partition fetches let one poll span many partitions instead of idling workers.
+		kgo.FetchMaxPartitionBytes(64<<10),
 		kgo.OnPartitionsCallbackBlocked(c.onRebalanceBlocked),
 		kgo.OnPartitionsAssigned(c.onAssigned),
 		kgo.OnPartitionsRevoked(c.onRevoked),
