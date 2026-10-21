@@ -9,8 +9,12 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"strconv"
 	"sync/atomic"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/57Ajay/relay/internal/event"
 	"github.com/57Ajay/relay/internal/storage"
@@ -42,28 +46,31 @@ type Server struct {
 	store    Store
 	opts     Options
 	log      *slog.Logger
+	metrics  *telemetry.APIMetrics
 	inflight chan struct{}
 	draining atomic.Bool
 	handler  http.Handler
 }
 
-func New(pub Publisher, store Store, opts Options, log *slog.Logger) *Server {
+func New(pub Publisher, store Store, reg *prometheus.Registry, opts Options, log *slog.Logger) *Server {
 	s := &Server{
 		pub:      pub,
 		store:    store,
 		opts:     opts,
 		log:      log,
+		metrics:  telemetry.NewAPIMetrics(reg),
 		inflight: make(chan struct{}, opts.MaxInFlight),
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/events", s.createEvent)
-	mux.HandleFunc("GET /v1/events/{id}", s.getEvent)
-	mux.HandleFunc("GET /v1/stats", s.getStats)
+	s.route(mux, "POST /v1/events", s.createEvent)
+	s.route(mux, "GET /v1/events/{id}", s.getEvent)
+	s.route(mux, "GET /v1/stats", s.getStats)
 	mux.HandleFunc("GET /healthz", telemetry.Healthz)
 	// Ingestion only needs Kafka; a database outage must not take the API out of the load balancer.
 	mux.Handle("GET /readyz", telemetry.ReadyHandler(&s.draining,
 		telemetry.Check{Name: "kafka", Critical: true, Fn: pub.Ping},
 		telemetry.Check{Name: "postgres", Fn: store.Ping}))
+	mux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	s.handler = mux
 	return s
 }
@@ -78,13 +85,14 @@ func (s *Server) createEvent(w http.ResponseWriter, r *http.Request) {
 	case s.inflight <- struct{}{}:
 		defer func() { <-s.inflight }()
 	default:
+		s.metrics.Received.WithLabelValues("overloaded").Inc()
 		w.Header().Set("Retry-After", "1")
 		writeError(w, http.StatusServiceUnavailable, "server overloaded, retry later", nil)
 		return
 	}
 
 	if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
-		writeError(w, http.StatusUnsupportedMediaType, "content type must be application/json", nil)
+		s.reject(w, http.StatusUnsupportedMediaType, "content type must be application/json", nil)
 		return
 	}
 	ev, err := event.Decode(http.MaxBytesReader(w, r.Body, s.opts.MaxBodyBytes))
@@ -92,10 +100,10 @@ func (s *Server) createEvent(w http.ResponseWriter, r *http.Request) {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
 			w.Header().Set("Connection", "close")
-			writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("request body exceeds %d bytes", tooLarge.Limit), nil)
+			s.reject(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("request body exceeds %d bytes", tooLarge.Limit), nil)
 			return
 		}
-		writeError(w, http.StatusBadRequest, "malformed request body", []string{err.Error()})
+		s.reject(w, http.StatusBadRequest, "malformed request body", []string{err.Error()})
 		return
 	}
 	if ev.ID == "" {
@@ -106,7 +114,7 @@ func (s *Server) createEvent(w http.ResponseWriter, r *http.Request) {
 		if verr, ok := errors.AsType[*event.ValidationError](err); ok {
 			problems = verr.Problems
 		}
-		writeError(w, http.StatusBadRequest, "invalid event", problems)
+		s.reject(w, http.StatusBadRequest, "invalid event", problems)
 		return
 	}
 
@@ -114,14 +122,19 @@ func (s *Server) createEvent(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), s.opts.PublishTimeout)
 	defer cancel()
 	if err := s.pub.Publish(ctx, ev); err != nil {
+		s.metrics.Received.WithLabelValues("unavailable").Inc()
 		s.log.ErrorContext(ctx, "publish failed", "event_id", ev.ID, "err", err)
 		writeJSON(w, http.StatusServiceUnavailable, errorBody{Error: "event broker unavailable, retry with the same event_id", EventID: ev.ID})
 		return
 	}
 
+	s.metrics.Received.WithLabelValues("accepted").Inc()
+
+	// Best effort: a failed status write only delays visibility until the consumer records it.
 	pctx, pcancel := context.WithTimeout(ctx, pendingWriteTimeout)
 	defer pcancel()
 	if err := s.store.MarkPending(pctx, ev); err != nil {
+		s.metrics.StatusWriteErrors.Inc()
 		s.log.DebugContext(ctx, "could not record pending status", "event_id", ev.ID, "err", err)
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"event_id": ev.ID, "status": "accepted"})
@@ -148,6 +161,31 @@ func (s *Server) getStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"stats": stats})
+}
+
+func (s *Server) reject(w http.ResponseWriter, code int, msg string, details []string) {
+	s.metrics.Received.WithLabelValues("invalid").Inc()
+	writeError(w, code, msg, details)
+}
+
+// route records latency per route pattern, never the raw path, so label cardinality stays bounded.
+func (s *Server) route(mux *http.ServeMux, pattern string, h http.HandlerFunc) {
+	mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, code: http.StatusOK}
+		h(rec, r)
+		s.metrics.Requests.WithLabelValues(pattern, strconv.Itoa(rec.code)).Observe(time.Since(start).Seconds())
+	})
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	code int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.code = code
+	r.ResponseWriter.WriteHeader(code)
 }
 
 type errorBody struct {

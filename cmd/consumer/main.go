@@ -49,6 +49,8 @@ func run() error {
 		}
 	}
 
+	reg := telemetry.NewRegistry()
+	metrics := telemetry.NewConsumerMetrics(reg)
 	consumer, err := kafka.NewConsumer(kafka.ConsumerConfig{
 		Brokers:        cfg.Brokers,
 		Group:          cfg.GroupID,
@@ -57,7 +59,7 @@ func run() error {
 		Workers:        cfg.Workers,
 		MaxPollRecords: cfg.MaxPollRecords,
 		SessionTimeout: cfg.SessionTimeout,
-	}, log.With("component", "kafka"))
+	}, log.With("component", "kafka"), metrics)
 	if err != nil {
 		return err
 	}
@@ -66,12 +68,12 @@ func run() error {
 		Backoff:     processor.Backoff{Base: cfg.RetryBaseDelay, Max: cfg.RetryMaxDelay},
 		OpTimeout:   cfg.OpTimeout,
 		FaultRate:   cfg.FaultRate,
-	}, log.With("component", "processor"))
+	}, log.With("component", "processor"), metrics)
 
 	var draining atomic.Bool
 	ops := &http.Server{
 		Addr: cfg.OpsAddr,
-		Handler: telemetry.OpsMux(&draining,
+		Handler: telemetry.OpsMux(reg, &draining,
 			telemetry.Check{Name: "kafka", Critical: true, Fn: consumer.Ping},
 			telemetry.Check{Name: "postgres", Critical: true, Fn: store.Ping}),
 		ReadHeaderTimeout: 5 * time.Second,

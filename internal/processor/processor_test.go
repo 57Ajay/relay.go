@@ -13,9 +13,12 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/57Ajay/relay/internal/event"
+	"github.com/57Ajay/relay/internal/telemetry"
 )
 
 type fakeStore struct {
@@ -70,11 +73,12 @@ func (d *fakeDLQ) DeadLetter(_ context.Context, _ *kgo.Record, _ string, attempt
 	return nil
 }
 
-func setup() (*Processor, *fakeStore, *fakeDLQ) {
+func setup() (*Processor, *fakeStore, *fakeDLQ, *telemetry.ConsumerMetrics) {
 	store := &fakeStore{processed: map[string]int{}, failed: map[string]string{}}
 	dlq := &fakeDLQ{}
+	m := telemetry.NewConsumerMetrics(prometheus.NewRegistry())
 	cfg := Config{MaxAttempts: 3, Backoff: Backoff{Base: time.Millisecond, Max: 4 * time.Millisecond}, OpTimeout: time.Second}
-	return New(store, dlq, cfg, slog.New(slog.NewTextHandler(io.Discard, nil))), store, dlq
+	return New(store, dlq, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), m), store, dlq, m
 }
 
 func record(t *testing.T, id string, payload string) *kgo.Record {
@@ -87,7 +91,7 @@ func record(t *testing.T, id string, payload string) *kgo.Record {
 }
 
 func TestDuplicateDeliveryAppliesOnce(t *testing.T) {
-	p, store, dlq := setup()
+	p, store, dlq, m := setup()
 	rec := record(t, "evt-1", `{"amount":10}`)
 	for range 3 {
 		if err := p.Handle(context.Background(), rec); err != nil {
@@ -97,10 +101,13 @@ func TestDuplicateDeliveryAppliesOnce(t *testing.T) {
 	if store.processed["evt-1"] != 1 || len(dlq.attempts) != 0 {
 		t.Fatalf("processed=%d dlq=%v", store.processed["evt-1"], dlq.attempts)
 	}
+	if got := testutil.ToFloat64(m.Processed.WithLabelValues(outcomeDuplicate)); got != 2 {
+		t.Fatalf("duplicates = %v, want 2", got)
+	}
 }
 
 func TestTransientFailureIsRetried(t *testing.T) {
-	p, store, dlq := setup()
+	p, store, dlq, m := setup()
 	store.completeErr = func(call int) error {
 		if call < 3 {
 			return &pgconn.PgError{Code: "40001"}
@@ -113,13 +120,13 @@ func TestTransientFailureIsRetried(t *testing.T) {
 	if store.processed["evt-2"] != 1 || len(dlq.attempts) != 0 {
 		t.Fatalf("processed=%d dlq=%v", store.processed["evt-2"], dlq.attempts)
 	}
-	if store.calls != 3 {
-		t.Fatalf("complete calls = %d, want 3 (two retries)", store.calls)
+	if got := testutil.ToFloat64(m.Retried.WithLabelValues("transient")); got != 2 {
+		t.Fatalf("retries = %v, want 2", got)
 	}
 }
 
 func TestRetryExhaustionDeadLetters(t *testing.T) {
-	p, store, dlq := setup()
+	p, store, dlq, _ := setup()
 	store.completeErr = func(int) error { return errors.New("downstream timeout") }
 	if err := p.Handle(context.Background(), record(t, "evt-3", `{}`)); err != nil {
 		t.Fatal(err)
@@ -130,7 +137,7 @@ func TestRetryExhaustionDeadLetters(t *testing.T) {
 }
 
 func TestPermanentFailuresSkipRetries(t *testing.T) {
-	p, store, dlq := setup()
+	p, store, dlq, m := setup()
 	poison := &kgo.Record{Topic: "events", Value: []byte(`not json`)}
 	for _, rec := range []*kgo.Record{poison, record(t, "evt-4", `{"amount":-1}`)} {
 		if err := p.Handle(context.Background(), rec); err != nil {
@@ -140,15 +147,13 @@ func TestPermanentFailuresSkipRetries(t *testing.T) {
 	if len(dlq.attempts) != 2 || store.calls != 0 || store.failed["evt-4"] == "" {
 		t.Fatalf("dlq=%v completeCalls=%d failed=%v", dlq.attempts, store.calls, store.failed)
 	}
-	for i, a := range dlq.attempts {
-		if a != 1 {
-			t.Fatalf("dead letter %d attempts = %d, want 1 (no retries)", i, a)
-		}
+	if got := testutil.ToFloat64(m.Failed.WithLabelValues("permanent")); got != 2 {
+		t.Fatalf("permanent failures = %v, want 2", got)
 	}
 }
 
 func TestUnavailableDatabaseNeverDeadLetters(t *testing.T) {
-	p, store, dlq := setup()
+	p, store, dlq, _ := setup()
 	store.claimErr, store.claimFailures = &net.OpError{Op: "dial", Err: errors.New("connection refused")}, math.MaxInt
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -161,7 +166,7 @@ func TestUnavailableDatabaseNeverDeadLetters(t *testing.T) {
 }
 
 func TestOutageDoesNotConsumeRetryBudget(t *testing.T) {
-	p, store, dlq := setup()
+	p, store, dlq, _ := setup()
 	store.claimErr, store.claimFailures = &pgconn.PgError{Code: "57P03"}, 10
 	store.completeErr = func(call int) error {
 		if call == 1 {
@@ -217,7 +222,7 @@ func TestBackoffDelayIsBoundedAndJittered(t *testing.T) {
 }
 
 func TestPanicIsContainedAndDeadLettered(t *testing.T) {
-	p, store, dlq := setup()
+	p, store, dlq, _ := setup()
 	store.completeErr = func(int) error { panic("boom") }
 	if err := p.Handle(context.Background(), record(t, "evt-7", `{}`)); err != nil {
 		t.Fatal(err)

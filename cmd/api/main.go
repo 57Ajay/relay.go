@@ -49,7 +49,7 @@ func run() error {
 	}
 	defer store.Close()
 
-	srv := api.New(producer, store, api.Options{
+	srv := api.New(producer, store, telemetry.NewRegistry(), api.Options{
 		MaxBodyBytes:   cfg.MaxBodyBytes,
 		MaxInFlight:    cfg.MaxInFlight,
 		PublishTimeout: cfg.PublishTimeout,

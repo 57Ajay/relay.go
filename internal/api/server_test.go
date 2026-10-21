@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/57Ajay/relay/internal/event"
 	"github.com/57Ajay/relay/internal/storage"
 )
@@ -54,7 +56,7 @@ func (s *fakeStore) Ping(context.Context) error                         { return
 
 func newServer(pub *fakePublisher, store *fakeStore) *Server {
 	opts := Options{MaxBodyBytes: 1024, MaxInFlight: 8, PublishTimeout: time.Second}
-	return New(pub, store, opts, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return New(pub, store, prometheus.NewRegistry(), opts, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 func post(srv http.Handler, contentType, body string) *httptest.ResponseRecorder {

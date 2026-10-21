@@ -13,6 +13,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/57Ajay/relay/internal/event"
+	"github.com/57Ajay/relay/internal/telemetry"
 )
 
 const (
@@ -42,23 +43,25 @@ type Config struct {
 }
 
 type Processor struct {
-	store Store
-	dlq   DeadLetterer
-	cfg   Config
-	log   *slog.Logger
+	store   Store
+	dlq     DeadLetterer
+	cfg     Config
+	log     *slog.Logger
+	metrics *telemetry.ConsumerMetrics
 }
 
-func New(store Store, dlq DeadLetterer, cfg Config, log *slog.Logger) *Processor {
-	return &Processor{store: store, dlq: dlq, cfg: cfg, log: log}
+func New(store Store, dlq DeadLetterer, cfg Config, log *slog.Logger, m *telemetry.ConsumerMetrics) *Processor {
+	return &Processor{store: store, dlq: dlq, cfg: cfg, log: log, metrics: m}
 }
 
 // Handle implements kafka.Handler; it only returns an error when ctx is cancelled mid-retry.
 func (p *Processor) Handle(ctx context.Context, rec *kgo.Record) error {
+	start := time.Now()
 	outcome, err := p.handle(ctx, rec)
 	if err != nil {
 		return err
 	}
-	p.log.InfoContext(ctx, "record handled", "partition", rec.Partition, "offset", rec.Offset, "outcome", outcome)
+	p.metrics.Duration.WithLabelValues(outcome).Observe(time.Since(start).Seconds())
 	return nil
 }
 
@@ -81,6 +84,10 @@ func (p *Processor) handle(ctx context.Context, rec *kgo.Record) (string, error)
 	for try := 1; ; try++ {
 		outcome, err := p.attempt(ctx, ev, amount)
 		if err == nil {
+			p.metrics.Processed.WithLabelValues(outcome).Inc()
+			if outcome == outcomeProcessed {
+				p.metrics.EndToEnd.Observe(time.Since(rec.Timestamp).Seconds())
+			}
 			return outcome, nil
 		}
 		class := Classify(err)
@@ -91,6 +98,7 @@ func (p *Processor) handle(ctx context.Context, rec *kgo.Record) (string, error)
 			return p.deadLetter(ctx, rec, &ev, attempts, err)
 		}
 		delay := p.cfg.Backoff.Delay(try)
+		p.metrics.Retried.WithLabelValues(class.String()).Inc()
 		log.WarnContext(ctx, "attempt failed; retrying", "try", try, "class", class.String(), "retry_in", delay, "err", err)
 		if err := sleep(ctx, delay); err != nil {
 			return "", fmt.Errorf("retry abandoned after try %d: %w", try, err)
@@ -146,6 +154,11 @@ func (p *Processor) deadLetter(ctx context.Context, rec *kgo.Record, ev *event.E
 		}
 	}
 
+	label := "exhausted"
+	if Classify(cause) == Permanent {
+		label = "permanent"
+	}
+	p.metrics.Failed.WithLabelValues(label).Inc()
 	log := p.log.With("partition", rec.Partition, "offset", rec.Offset, "attempts", attempts, "reason", reason)
 	if ev == nil {
 		log.ErrorContext(ctx, "undecodable record dead-lettered")

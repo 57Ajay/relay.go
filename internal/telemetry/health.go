@@ -6,6 +6,9 @@ import (
 	"net/http"
 	"sync/atomic"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 type Check struct {
@@ -40,10 +43,11 @@ func ReadyHandler(draining *atomic.Bool, checks ...Check) http.HandlerFunc {
 	}
 }
 
-func OpsMux(draining *atomic.Bool, checks ...Check) *http.ServeMux {
+func OpsMux(reg *prometheus.Registry, draining *atomic.Bool, checks ...Check) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", Healthz)
 	mux.Handle("GET /readyz", ReadyHandler(draining, checks...))
+	mux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	return mux
 }
 

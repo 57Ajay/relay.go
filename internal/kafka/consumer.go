@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+
+	"github.com/57Ajay/relay/internal/telemetry"
 )
 
 // Handler returns nil once a record is fully handled; an error leaves it uncommitted for redelivery.
@@ -27,17 +29,18 @@ type ConsumerConfig struct {
 // Consumer processes the partitions of a batch concurrently, records within a partition in order.
 // Rebalances are blocked while a batch is in flight, so commits never target partitions it no longer owns.
 type Consumer struct {
-	cl  *kgo.Client
-	cfg ConsumerConfig
-	log *slog.Logger
+	cl      *kgo.Client
+	cfg     ConsumerConfig
+	log     *slog.Logger
+	metrics *telemetry.ConsumerMetrics
 
 	mu               sync.Mutex
 	cancelBatch      context.CancelFunc
 	rebalancePending bool
 }
 
-func NewConsumer(cfg ConsumerConfig, log *slog.Logger) (*Consumer, error) {
-	c := &Consumer{cfg: cfg, log: log}
+func NewConsumer(cfg ConsumerConfig, log *slog.Logger, m *telemetry.ConsumerMetrics) (*Consumer, error) {
+	c := &Consumer{cfg: cfg, log: log, metrics: m}
 	cl, err := newClient(cfg.Brokers,
 		kgo.ConsumerGroup(cfg.Group),
 		kgo.ConsumeTopics(cfg.Topic),
@@ -107,7 +110,9 @@ func (c *Consumer) processBatch(ctx context.Context, h Handler, fetches kgo.Fetc
 		wg.Go(func() {
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			c.metrics.ActiveWorkers.Inc()
 			n := c.processPartition(ctx, h, p.Records)
+			c.metrics.ActiveWorkers.Dec()
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -129,6 +134,7 @@ func (c *Consumer) processBatch(ctx context.Context, h Handler, fetches kgo.Fetc
 		commitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
 		if err := c.cl.CommitRecords(commitCtx, done...); err != nil {
+			c.metrics.CommitErrors.Inc()
 			c.log.ErrorContext(ctx, "offset commit failed; records will be redelivered", "err", err)
 		}
 	}
