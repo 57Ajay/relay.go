@@ -1,7 +1,9 @@
 SHELL := /bin/bash
+IMAGE ?= relay:dev
+CLUSTER ?= relay
 BENCH_DATABASE_URL ?= postgres://relay:relay@localhost:5432/relay?sslmode=disable
 
-.PHONY: build test lint integration up down reset logs bench
+.PHONY: build test lint integration up down reset logs bench kind-up kind-deploy kind-down
 
 build:
 	go build -o bin/ ./cmd/...
@@ -31,3 +33,16 @@ logs:
 
 bench:
 	go run ./cmd/loadgen -rate $${RATE:-1000} -duration $${DURATION:-30s} -db "$(BENCH_DATABASE_URL)"
+
+kind-up:
+	kind create cluster --name $(CLUSTER) --config deploy/kubernetes/kind.yaml
+	docker build -t $(IMAGE) .
+	kind load docker-image $(IMAGE) --name $(CLUSTER)
+
+kind-deploy:
+	kubectl apply -k deploy/kubernetes
+	kubectl -n relay wait --for=condition=complete job/create-topics --timeout=300s
+	kubectl -n relay rollout status deploy/api deploy/consumer --timeout=300s
+
+kind-down:
+	kind delete cluster --name $(CLUSTER)

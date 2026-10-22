@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: relay
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: relay-config
+data:
+  KAFKA_BROKERS: kafka:9092
+  KAFKA_TOPIC: events
+  KAFKA_DLQ_TOPIC: events.dlq
+  KAFKA_GROUP_ID: relay-consumers
+  LOG_LEVEL: info
+  WORKERS: "4"
+  MAX_ATTEMPTS: "5"
+---
+# Development credentials only; use a secret manager outside local clusters.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: relay-db
+type: Opaque
+stringData:
+  POSTGRES_USER: relay
+  POSTGRES_PASSWORD: relay
+  POSTGRES_DB: relay
+  DATABASE_URL: postgres://relay:relay@postgres:5432/relay?sslmode=disable

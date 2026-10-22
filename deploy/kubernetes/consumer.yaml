@@ -1,0 +1,50 @@
+# Replicas beyond the partition count (6) sit idle: a partition is owned by
+# one group member at a time.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: consumer
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  selector:
+    matchLabels: { app: consumer }
+  template:
+    metadata:
+      labels: { app: consumer }
+      annotations: { prometheus.io/scrape: "true", prometheus.io/port: "9090" }
+    spec:
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: consumer
+          image: relay:dev
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/consumer"]
+          envFrom:
+            - configMapRef: { name: relay-config }
+          env:
+            - { name: SERVICE_NAME, value: relay-consumer }
+            - name: DATABASE_URL
+              valueFrom: { secretKeyRef: { name: relay-db, key: DATABASE_URL } }
+          ports:
+            - { name: ops, containerPort: 9090 }
+          readinessProbe:
+            httpGet: { path: /readyz, port: ops }
+            timeoutSeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: ops }
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { cpu: "1", memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }

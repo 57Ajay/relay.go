@@ -1,0 +1,21 @@
+# Optional lag-based autoscaling (requires KEDA). Not part of the kustomization.
+#   kubectl apply -f deploy/kubernetes/keda-scaledobject.yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: consumer
+  namespace: relay
+spec:
+  scaleTargetRef:
+    name: consumer
+  minReplicaCount: 1
+  maxReplicaCount: 6
+  cooldownPeriod: 120
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: kafka.relay.svc.cluster.local:9092
+        consumerGroup: relay-consumers
+        topic: events
+        lagThreshold: "500"
+        offsetResetPolicy: earliest
