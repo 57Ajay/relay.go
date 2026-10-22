@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 BENCH_DATABASE_URL ?= postgres://relay:relay@localhost:5432/relay?sslmode=disable
 
-.PHONY: build test integration up down reset logs bench
+.PHONY: build test lint integration up down reset logs bench
 
 build:
 	go build -o bin/ ./cmd/...
@@ -9,6 +9,9 @@ build:
 test:
 	go vet ./...
 	go test -race -count=1 ./...
+
+lint:
+	golangci-lint run ./...
 
 integration:
 	docker compose up -d --wait kafka postgres

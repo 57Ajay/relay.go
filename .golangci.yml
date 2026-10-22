@@ -1,0 +1,32 @@
+version: "2"
+
+run:
+  build-tags: [integration]
+
+linters:
+  enable:
+    - bodyclose
+    - errorlint
+    - gosec
+    - misspell
+    - noctx
+    - revive
+    - unconvert
+  settings:
+    gosec:
+      # G404: math/rand is intended for jitter, fault injection and load data.
+      excludes: [G115, G404]
+    revive:
+      rules:
+        - name: exported
+          disabled: true
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters: [noctx]
+
+formatters:
+  enable: [gofmt, goimports]
+  settings:
+    goimports:
+      local-prefixes: [github.com/57Ajay/relay]

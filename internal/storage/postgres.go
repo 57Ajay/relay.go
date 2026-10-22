@@ -8,14 +8,15 @@ import (
 	"io/fs"
 	"time"
 
-	"github.com/57Ajay/relay/internal/event"
-	"github.com/57Ajay/relay/migrations"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/57Ajay/relay/internal/event"
+	"github.com/57Ajay/relay/migrations"
 )
 
 var ErrNotFound = errors.New("event not found")
