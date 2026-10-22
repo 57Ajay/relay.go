@@ -21,6 +21,8 @@ import (
 
 var ErrNotFound = errors.New("event not found")
 
+const migrationLockID = 72_04_2026
+
 type Store struct {
 	pool   *pgxpool.Pool
 	tracer trace.Tracer
@@ -73,6 +75,10 @@ func (s *Store) Migrate(ctx context.Context) error {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// CREATE TABLE IF NOT EXISTS is not safe under concurrency; replicas starting together migrate one at a time.
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", migrationLockID); err != nil {
+		return fmt.Errorf("acquire migration lock: %w", err)
+	}
 	if _, err := tx.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`); err != nil {
 		return fmt.Errorf("create schema_migrations: %w", err)
